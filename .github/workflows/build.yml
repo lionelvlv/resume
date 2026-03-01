@@ -10,15 +10,14 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    container:
+      image: danteev/texlive:latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install LaTeX
-        run: sudo apt-get update && sudo apt-get install -y texlive-full
 
       - name: Compile LaTeX
         run: latexmk -pdf -interaction=nonstopmode Lionel_Verano_Resume.tex
