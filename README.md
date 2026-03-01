@@ -1,2 +1,2 @@
 # resume
-![Resume Build](https://github.com/USER/REPO/actions/workflows/build.yml/badge.svg)
+[![Build LaTeX Resume](https://github.com/lionelvlv/resume/actions/workflows/build.yml/badge.svg)](https://github.com/lionelvlv/resume/actions/workflows/build.yml)
