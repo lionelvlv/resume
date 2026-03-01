@@ -1,0 +1,33 @@
+name: Build and Commit Resume PDF
+
+on:
+  push:
+    paths:
+      - "Lionel_Verano_Resume.tex"
+      - "**/*.tex"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install TeXLive
+        run: sudo apt-get update && sudo apt-get install -y texlive-full
+
+      - name: Compile LaTeX
+        run: latexmk -pdf -interaction=nonstopmode Lionel_Verano_Resume.tex
+
+      - name: Commit PDF back to repo
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add Lionel_Verano_Resume.pdf
+          git commit -m "Auto-build resume PDF" || echo "No changes to commit"
+          git push
+
