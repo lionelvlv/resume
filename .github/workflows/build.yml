@@ -1,35 +1,168 @@
-name: Build and Commit PDF
+name: Build LaTeX Resume
 
 on:
   push:
-  workflow_dispatch:
+    branches: 
+      - main
+    paths:
+      - '**.tex'
+      - '**.cls'
+      - '.github/workflows/latex-build.yml'
+  workflow_dispatch:  # Allow manual triggers
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  build-latex:
     runs-on: ubuntu-latest
-    container:
-      image: danteev/texlive:latest
-
-    defaults:
-      run:
-        working-directory: ${{ github.workspace }}
-
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Compile LaTeX
-        run: latexmk -pdf -interaction=nonstopmode Lionel_Verano_Resume.tex
-
-      - name: Commit PDF
+          fetch-depth: 0  # Full history for proper git operations
+      
+      - name: Get commit info
+        id: commit
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add Lionel_Verano_Resume.pdf
-          git commit -m "Auto-build resume PDF" || echo "No changes to commit"
-          git push
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "commit_date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+      
+      - name: Compile LaTeX document
+        uses: xu-cheng/latex-action@v3
+        with:
+          root_file: Lionel_Verano_Resume.tex
+          args: -pdf -file-line-error -interaction=nonstopmode
+          latexmk_use_lualatex: false
+          latexmk_use_xelatex: false
+          latexmk_shell_escape: false
+          extra_system_packages: ""
+          pre_compile: ""
+          post_compile: ""
+          compiler: latexmk
+      
+      - name: Validate PDF output
+        run: |
+          if [ ! -f Lionel_Verano_Resume.pdf ]; then
+            echo "❌ Error: PDF was not generated!"
+            exit 1
+          fi
+          
+          PDF_SIZE=$(du -h Lionel_Verano_Resume.pdf | cut -f1)
+          echo "✅ PDF generated successfully!"
+          echo "📄 File size: $PDF_SIZE"
+          echo "pdf_size=$PDF_SIZE" >> $GITHUB_ENV
+          
+          # Check if PDF is valid (has content)
+          if [ $(stat -c%s Lionel_Verano_Resume.pdf) -lt 10000 ]; then
+            echo "⚠️ Warning: PDF seems too small (less than 10KB)"
+            exit 1
+          fi
+      
+      - name: Rename PDF with metadata
+        run: |
+          cp Lionel_Verano_Resume.pdf "Lionel_Verano_Resume_${{ steps.commit.outputs.commit_date }}.pdf"
+      
+      - name: Upload PDF as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: resume-pdf-${{ steps.commit.outputs.short_sha }}
+          path: |
+            Lionel_Verano_Resume.pdf
+            Lionel_Verano_Resume_${{ steps.commit.outputs.commit_date }}.pdf
+          retention-days: 90
+          if-no-files-found: error
+      
+      - name: Delete old 'latest' release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes || echo "No existing 'latest' release"
+          git push origin :refs/tags/latest || echo "No existing 'latest' tag"
+      
+      - name: Create or update 'latest' release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Lionel_Verano_Resume.pdf
+            Lionel_Verano_Resume_${{ steps.commit.outputs.commit_date }}.pdf
+          tag_name: latest
+          name: "Latest Resume Build"
+          body: |
+            ## 📄 Lionel Verano's Resume
+            
+            **Auto-generated from commit:** [`${{ steps.commit.outputs.short_sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+            **Build date:** ${{ steps.commit.outputs.commit_date }}
+            **PDF size:** ${{ env.pdf_size }}
+            
+            ### 📥 Download Options:
+            - **Direct link:** [Lionel_Verano_Resume.pdf](https://github.com/${{ github.repository }}/releases/download/latest/Lionel_Verano_Resume.pdf)
+            - **Dated version:** [Lionel_Verano_Resume_${{ steps.commit.outputs.commit_date }}.pdf](https://github.com/${{ github.repository }}/releases/download/latest/Lionel_Verano_Resume_${{ steps.commit.outputs.commit_date }}.pdf)
+            
+            ---
+            
+            **Build Status:** ✅ Success
+            
+            **Workflow run:** [View Details](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          draft: false
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Generate permalink
+        run: |
+          echo "🔗 Permanent download link:"
+          echo "https://github.com/${{ github.repository }}/releases/download/latest/Lionel_Verano_Resume.pdf"
+          echo ""
+          echo "📋 Add this to your LinkedIn/website/portfolio!"
+      
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "❌ Resume build failed!"
+          echo "Check the logs above for LaTeX errors"
+          exit 1
+
+  # Optional: Create timestamped release on main branch only
+  create-timestamped-release:
+    runs-on: ubuntu-latest
+    needs: build-latex
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: resume-pdf-*
+          merge-multiple: true
+      
+      - name: Get version info
+        id: version
+        run: |
+          VERSION="v$(date +'%Y.%m.%d')-$(git rev-parse --short HEAD)"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "date=$(date +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_OUTPUT
+      
+      - name: Create timestamped release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Lionel_Verano_Resume*.pdf
+          tag_name: ${{ steps.version.outputs.version }}
+          name: "Resume - ${{ steps.version.outputs.date }}"
+          body: |
+            ## Resume Build ${{ steps.version.outputs.version }}
+            
+            Automatically generated from commit ${{ github.sha }}
+            
+            **Changes in this build:**
+            ${{ github.event.head_commit.message }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
