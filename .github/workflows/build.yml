@@ -14,9 +14,9 @@ permissions:
   contents: write
 
 jobs:
-  build-latex:
+  build-and-publish:
     runs-on: ubuntu-latest
-    # Prevent infinite loops - skip if last commit was from this bot
+    # Prevent infinite loops
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     
     steps:
@@ -24,6 +24,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      
+      - name: Get commit info
+        id: commit
+        run: |
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "commit_date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+          echo "version=v$(date +'%Y.%m.%d')-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
       
       - name: Compile LaTeX document
         uses: xu-cheng/latex-action@v3
@@ -42,6 +50,7 @@ jobs:
           PDF_SIZE=$(du -h Lionel_Verano_Resume.pdf | cut -f1)
           echo "✅ PDF generated successfully!"
           echo "📄 File size: $PDF_SIZE"
+          echo "pdf_size=$PDF_SIZE" >> $GITHUB_ENV
           
           # Check if PDF has reasonable size
           if [ $(stat -c%s Lionel_Verano_Resume.pdf) -lt 10000 ]; then
@@ -49,11 +58,16 @@ jobs:
             exit 1
           fi
       
-      - name: Check for changes
+      - name: Create dated backup
+        run: |
+          cp Lionel_Verano_Resume.pdf "Lionel_Verano_Resume_${{ steps.commit.outputs.commit_date }}.pdf"
+      
+      - name: Check for PDF changes
         id: check_changes
         run: |
           git diff --quiet Lionel_Verano_Resume.pdf || echo "changed=true" >> $GITHUB_OUTPUT
       
+      # PART 1: Commit to repository for raw URL
       - name: Commit PDF to repository
         if: steps.check_changes.outputs.changed == 'true'
         run: |
@@ -62,25 +76,119 @@ jobs:
           git add Lionel_Verano_Resume.pdf
           git commit -m "Auto-update resume PDF [skip ci]
           
-          Built from commit: ${{ github.sha }}
-          Triggered by: ${{ github.event.head_commit.message }}"
+          📄 Built from commit: ${{ github.sha }}
+          📝 Changes: ${{ github.event.head_commit.message }}
+          ⏰ Build time: $(date +'%Y-%m-%d %H:%M:%S UTC')
+          📦 File size: ${{ env.pdf_size }}"
           git push
       
-      - name: Generate access URLs
+      # PART 2: Create/update 'latest' release
+      - name: Delete old 'latest' release
+        if: steps.check_changes.outputs.changed == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes || echo "No existing 'latest' release"
+          git push origin :refs/tags/latest || echo "No existing 'latest' tag"
+      
+      - name: Create 'latest' release
+        if: steps.check_changes.outputs.changed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Lionel_Verano_Resume.pdf
+            Lionel_Verano_Resume_${{ steps.commit.outputs.commit_date }}.pdf
+          tag_name: latest
+          name: "Latest Resume Build"
+          body: |
+            ## 📄 Lionel Verano's Resume - Latest Build
+            
+            **Commit:** [`${{ steps.commit.outputs.short_sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})  
+            **Date:** ${{ steps.commit.outputs.commit_date }}  
+            **Size:** ${{ env.pdf_size }}
+            
+            ### 📥 Download Options:
+            
+            **Option 1: Direct URL (always latest)**
+            ```
+            https://github.com/${{ github.repository }}/raw/main/Lionel_Verano_Resume.pdf
+            ```
+            ✅ Use this for LinkedIn, portfolio, email signature
+            
+            **Option 2: Release download**
+            - [Lionel_Verano_Resume.pdf](https://github.com/${{ github.repository }}/releases/download/latest/Lionel_Verano_Resume.pdf)
+            - [Lionel_Verano_Resume_${{ steps.commit.outputs.commit_date }}.pdf](https://github.com/${{ github.repository }}/releases/download/latest/Lionel_Verano_Resume_${{ steps.commit.outputs.commit_date }}.pdf)
+            
+            ### 📝 What Changed:
+            ```
+            ${{ github.event.head_commit.message }}
+            ```
+            
+            ---
+            **Build Status:** ✅ Success | **Workflow:** [View Details](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          draft: false
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      # PART 3: Create timestamped release for version history
+      - name: Create timestamped release
+        if: steps.check_changes.outputs.changed == 'true' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Lionel_Verano_Resume.pdf
+            Lionel_Verano_Resume_${{ steps.commit.outputs.commit_date }}.pdf
+          tag_name: ${{ steps.commit.outputs.version }}
+          name: "Resume - ${{ steps.commit.outputs.commit_date }}"
+          body: |
+            ## Resume Build ${{ steps.commit.outputs.version }}
+            
+            **Changes:**
+            ```
+            ${{ github.event.head_commit.message }}
+            ```
+            
+            **Download:** [Lionel_Verano_Resume.pdf](https://github.com/${{ github.repository }}/releases/download/${{ steps.commit.outputs.version }}/Lionel_Verano_Resume.pdf)
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Generate summary
         if: steps.check_changes.outputs.changed == 'true'
         run: |
-          echo "🎉 Resume PDF updated successfully!"
-          echo ""
-          echo "📥 Direct download link:"
-          echo "https://github.com/${{ github.repository }}/raw/main/Lionel_Verano_Resume.pdf"
-          echo ""
-          echo "👁️ View in browser:"
-          echo "https://github.com/${{ github.repository }}/blob/main/Lionel_Verano_Resume.pdf"
-          echo ""
-          echo "🔗 Raw content (for embedding):"
-          echo "https://raw.githubusercontent.com/${{ github.repository }}/main/Lionel_Verano_Resume.pdf"
+          echo "# 🎉 Resume Built Successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📥 Access Your Resume" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Option 1: Raw URL (Recommended)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "https://github.com/${{ github.repository }}/raw/main/Lionel_Verano_Resume.pdf" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Use this in LinkedIn, email signature, portfolio**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Option 2: Latest Release" >> $GITHUB_STEP_SUMMARY
+          echo "https://github.com/${{ github.repository }}/releases/tag/latest" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Option 3: Timestamped Archive" >> $GITHUB_STEP_SUMMARY
+          echo "https://github.com/${{ github.repository }}/releases/tag/${{ steps.commit.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "📊 **Build Info:** Size: ${{ env.pdf_size }} | Commit: \`${{ steps.commit.outputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
       
       - name: No changes detected
         if: steps.check_changes.outputs.changed != 'true'
         run: |
-          echo "ℹ️ PDF is already up to date, no commit needed"
+          echo "ℹ️ PDF is already up to date, no changes committed"
+          echo "# ℹ️ No Changes" >> $GITHUB_STEP_SUMMARY
+          echo "PDF hasn't changed, no new build needed." >> $GITHUB_STEP_SUMMARY
+      
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "# ❌ Build Failed" >> $GITHUB_STEP_SUMMARY
+          echo "Check the logs above for LaTeX compilation errors." >> $GITHUB_STEP_SUMMARY
+          exit 1
