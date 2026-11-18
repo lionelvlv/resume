@@ -2,86 +2,119 @@ name: Build LaTeX Resume
 
 on:
   push:
-    branches: 
+    branches:
       - main
     paths:
       - '**.tex'
       - '**.cls'
-      - '.github/workflows/latex-build.yml'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 permissions:
   contents: write
+
+# Only one build at a time so overlapping runs can't race on the push
+concurrency:
+  group: resume-build
+  cancel-in-progress: false
 
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     # Prevent infinite loops
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
-      
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Get commit info
         id: commit
         run: |
           echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "commit_date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
           echo "version=v$(date +'%Y.%m.%d')-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-      
+
       - name: Compile LaTeX document
         uses: xu-cheng/latex-action@v3
         with:
           root_file: Lionel_Verano_Resume.tex
           args: -pdf -file-line-error -interaction=nonstopmode
           compiler: latexmk
-      
+
+      # The latex action runs as root in Docker; fix ownership so git is happy
+      - name: Fix file ownership
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
+
       - name: Validate PDF output
         run: |
           if [ ! -f Lionel_Verano_Resume.pdf ]; then
             echo "❌ Error: PDF was not generated!"
             exit 1
           fi
-          
+
           PDF_SIZE=$(du -h Lionel_Verano_Resume.pdf | cut -f1)
           echo "✅ PDF generated successfully!"
           echo "📄 File size: $PDF_SIZE"
           echo "pdf_size=$PDF_SIZE" >> $GITHUB_ENV
-          
+
           # Check if PDF has reasonable size
           if [ $(stat -c%s Lionel_Verano_Resume.pdf) -lt 10000 ]; then
             echo "⚠️ Warning: PDF seems too small (less than 10KB)"
             exit 1
           fi
-      
+
       - name: Create dated backup
         run: |
           cp Lionel_Verano_Resume.pdf "Lionel_Verano_Resume_${{ steps.commit.outputs.commit_date }}.pdf"
-      
+
       - name: Check for PDF changes
         id: check_changes
         run: |
-          git diff --quiet Lionel_Verano_Resume.pdf || echo "changed=true" >> $GITHUB_OUTPUT
-      
+          # Only flag "changed" when git says the file differs (exit 1),
+          # not on git errors (exit 128).
+          # Also treat an untracked PDF as changed.
+          if ! git ls-files --error-unmatch Lionel_Verano_Resume.pdf >/dev/null 2>&1; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          elif git diff --quiet -- Lionel_Verano_Resume.pdf; then
+            echo "No PDF changes"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
       # PART 1: Commit to repository for raw URL
       - name: Commit PDF to repository
         if: steps.check_changes.outputs.changed == 'true'
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          PDF_SIZE: ${{ env.pdf_size }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Lionel_Verano_Resume.pdf
-          git commit -m "Auto-update resume PDF [skip ci]
-          
-          📄 Built from commit: ${{ github.sha }}
-          📝 Changes: ${{ github.event.head_commit.message }}
-          ⏰ Build time: $(date +'%Y-%m-%d %H:%M:%S UTC')
-          📦 File size: ${{ env.pdf_size }}"
-          git push
-      
+
+          if git diff --staged --quiet; then
+            echo "Nothing staged, skipping commit"
+            exit 0
+          fi
+
+          git commit \
+            -m "Auto-update resume PDF [skip ci]" \
+            -m "📄 Built from commit: ${GITHUB_SHA}" \
+            -m "📝 Changes: ${COMMIT_MSG}" \
+            -m "⏰ Build time: $(date +'%Y-%m-%d %H:%M:%S UTC')" \
+            -m "📦 File size: ${PDF_SIZE}"
+
+          # main may have moved during the ~8 min build; rebase before pushing
+          git pull --rebase --autostash origin main
+          git push origin HEAD:main
+
       # PART 2: Create/update 'latest' release
       - name: Delete old 'latest' release
         if: steps.check_changes.outputs.changed == 'true'
@@ -91,7 +124,7 @@ jobs:
         run: |
           gh release delete latest --yes || echo "No existing 'latest' release"
           git push origin :refs/tags/latest || echo "No existing 'latest' tag"
-      
+
       - name: Create 'latest' release
         if: steps.check_changes.outputs.changed == 'true'
         uses: softprops/action-gh-release@v2
@@ -103,28 +136,28 @@ jobs:
           name: "Latest Resume Build"
           body: |
             ## 📄 Lionel Verano's Resume - Latest Build
-            
+
             **Commit:** [`${{ steps.commit.outputs.short_sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})  
             **Date:** ${{ steps.commit.outputs.commit_date }}  
             **Size:** ${{ env.pdf_size }}
-            
+
             ### 📥 Download Options:
-            
+
             **Option 1: Direct URL (always latest)**
             ```
             https://github.com/${{ github.repository }}/raw/main/Lionel_Verano_Resume.pdf
             ```
             ✅ Use this for LinkedIn, portfolio, email signature
-            
+
             **Option 2: Release download**
             - [Lionel_Verano_Resume.pdf](https://github.com/${{ github.repository }}/releases/download/latest/Lionel_Verano_Resume.pdf)
             - [Lionel_Verano_Resume_${{ steps.commit.outputs.commit_date }}.pdf](https://github.com/${{ github.repository }}/releases/download/latest/Lionel_Verano_Resume_${{ steps.commit.outputs.commit_date }}.pdf)
-            
+
             ### 📝 What Changed:
             ```
             ${{ github.event.head_commit.message }}
             ```
-            
+
             ---
             **Build Status:** ✅ Success | **Workflow:** [View Details](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
           draft: false
@@ -132,7 +165,7 @@ jobs:
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
+
       # PART 3: Create timestamped release for version history
       - name: Create timestamped release
         if: steps.check_changes.outputs.changed == 'true' && github.event_name == 'push'
@@ -145,18 +178,18 @@ jobs:
           name: "Resume - ${{ steps.commit.outputs.commit_date }}"
           body: |
             ## Resume Build ${{ steps.commit.outputs.version }}
-            
+
             **Changes:**
             ```
             ${{ github.event.head_commit.message }}
             ```
-            
+
             **Download:** [Lionel_Verano_Resume.pdf](https://github.com/${{ github.repository }}/releases/download/${{ steps.commit.outputs.version }}/Lionel_Verano_Resume.pdf)
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Generate summary
         if: steps.check_changes.outputs.changed == 'true'
         run: |
@@ -178,17 +211,16 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "📊 **Build Info:** Size: ${{ env.pdf_size }} | Commit: \`${{ steps.commit.outputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
-      
+
       - name: No changes detected
         if: steps.check_changes.outputs.changed != 'true'
         run: |
           echo "ℹ️ PDF is already up to date, no changes committed"
           echo "# ℹ️ No Changes" >> $GITHUB_STEP_SUMMARY
           echo "PDF hasn't changed, no new build needed." >> $GITHUB_STEP_SUMMARY
-      
+
       - name: Notify on failure
         if: failure()
         run: |
           echo "# ❌ Build Failed" >> $GITHUB_STEP_SUMMARY
-          echo "Check the logs above for LaTeX compilation errors." >> $GITHUB_STEP_SUMMARY
-          exit 1
+          echo "Check the logs above for the failing step." >> $GITHUB_STEP_SUMMARY
